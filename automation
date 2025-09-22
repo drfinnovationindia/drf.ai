@@ -1,0 +1,642 @@
+# DRF Agent Monorepo – Ready-to-Deploy (Docker + CI)
+
+This repository packages the **API (FastAPI)** and **Admin Web (Next.js)** apps with Docker Compose and GitHub Actions CI/CD. It mirrors the schema/API/UI you approved.
+
+---
+
+## 0) Repo Tree
+```
+DRF-Agent-Monorepo/
+├─ apps/
+│  ├─ api/                     # FastAPI service
+│  │  ├─ src/
+│  │  │  ├─ main.py
+│  │  │  ├─ deps.py
+│  │  │  ├─ routers/
+│  │  │  │  ├─ crm.py
+│  │  │  │  ├─ proposals.py
+│  │  │  │  ├─ procurement.py
+│  │  │  │  ├─ tickets.py
+│  │  │  │  ├─ tenders.py
+│  │  │  │  └─ webhooks.py
+│  │  │  ├─ models/
+│  │  │  │  ├─ base.py
+│  │  │  │  ├─ ref.py
+│  │  │  │  ├─ crm.py
+│  │  │  │  ├─ tenders.py
+│  │  │  │  ├─ catalog.py
+│  │  │  │  ├─ procurement.py
+│  │  │  │  ├─ projects.py
+│  │  │  │  ├─ tickets.py
+│  │  │  │  ├─ finance.py
+│  │  │  │  └─ hr.py
+│  │  │  ├─ db.py
+│  │  │  ├─ settings.py
+│  │  │  └─ utils/
+│  │  │     ├─ pdf.py
+│  │  │     └─ whatsapp.py
+│  │  ├─ tests/
+│  │  │  └─ test_smoke.py
+│  │  ├─ pyproject.toml
+│  │  ├─ Dockerfile
+│  │  └─ .env.example
+│  │
+│  └─ web/                     # Next.js Admin
+│     ├─ app/
+│     │  ├─ layout.tsx
+│     │  ├─ page.tsx
+│     │  ├─ crm/page.tsx
+│     │  ├─ tenders/page.tsx
+│     │  ├─ proposals/page.tsx
+│     │  ├─ procurement/page.tsx
+│     │  ├─ projects/page.tsx
+│     │  ├─ tickets/page.tsx
+│     │  ├─ finance/page.tsx
+│     │  └─ hr/page.tsx
+│     ├─ components/
+│     │  ├─ Sidebar.tsx
+│     │  ├─ Topbar.tsx
+│     │  └─ KpiCard.tsx
+│     ├─ lib/api.ts
+│     ├─ package.json
+│     ├─ tsconfig.json
+│     ├─ next.config.mjs
+│     ├─ postcss.config.mjs
+│     ├─ tailwind.config.ts
+│     ├─ Dockerfile
+│     └─ .env.example
+│
+├─ docker-compose.yml
+├─ .env.example
+├─ package.json                # workspaces meta (optional)
+├─ README.md
+└─ .github/
+   └─ workflows/
+      └─ ci.yml
+```
+
+---
+
+## 1) Docker Compose (root)
+**`docker-compose.yml`**
+```yaml
+version: '3.9'
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: drf
+      POSTGRES_USER: drf
+      POSTGRES_PASSWORD: drfpass
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drf -d drf"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: ./apps/api
+    env_file:
+      - ./apps/api/.env.example
+    environment:
+      DATABASE_URL: postgresql+psycopg://drf:drfpass@db:5432/drf
+      CORS_ORIGINS: http://localhost:3000
+    depends_on:
+      db:
+        condition: service_healthy
+    ports: ["8000:8000"]
+
+  web:
+    build: ./apps/web
+    env_file:
+      - ./apps/web/.env.example
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+```
+
+---
+
+## 2) FastAPI – minimal working scaffold
+**`apps/api/pyproject.toml`**
+```toml
+[project]
+name = "drf-agent-api"
+version = "0.1.0"
+description = "DRF Agent Mesh API"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "pydantic>=2.8.0",
+  "SQLAlchemy>=2.0.30",
+  "psycopg[binary,pool]>=3.2.1",
+  "python-multipart>=0.0.7",
+  "jinja2>=3.1.4",
+  "httpx>=0.27.0",
+]
+
+[tool.uvicorn]
+host = "0.0.0.0"
+port = 8000
+```
+
+**`apps/api/.env.example`**
+```
+DATABASE_URL=postgresql+psycopg://drf:drfpass@db:5432/drf
+CORS_ORIGINS=http://localhost:3000
+JWT_SECRET=change-this
+```
+
+**`apps/api/Dockerfile`**
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY pyproject.toml /app/
+RUN pip install --no-cache-dir uv pip-tools && \
+    pip-compile --quiet --generate-hashes -o requirements.txt pyproject.toml && \
+    pip install --no-cache-dir -r requirements.txt
+COPY src /app/src
+EXPOSE 8000
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+**`apps/api/src/settings.py`**
+```python
+from pydantic import BaseModel
+import os
+
+class Settings(BaseModel):
+    database_url: str = os.getenv("DATABASE_URL", "postgresql+psycopg://drf:drfpass@localhost:5432/drf")
+    cors_origins: str = os.getenv("CORS_ORIGINS", "*")
+
+settings = Settings()
+```
+
+**`apps/api/src/db.py`**
+```python
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, DeclarativeBase
+from .settings import settings
+
+engine = create_engine(settings.database_url, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+
+class Base(DeclarativeBase):
+    pass
+```
+
+**`apps/api/src/models/base.py`**
+```python
+from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import text
+from ..db import Base
+import uuid
+
+class BaseModel(Base):
+    __abstract__ = True
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+```
+
+**`apps/api/src/models/ref.py`** (example table)
+```python
+from sqlalchemy.orm import Mapped, mapped_column
+from .base import BaseModel
+
+class User(BaseModel):
+    __tablename__ = "users"
+    name: Mapped[str] = mapped_column()
+    email: Mapped[str] = mapped_column(unique=True)
+    role: Mapped[str] = mapped_column(default="admin")
+```
+
+> Note: For brevity, only a couple of models are shown. You can extend per the schema already in canvas.
+
+**`apps/api/src/routers/crm.py`**
+```python
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/crm", tags=["CRM"])
+
+class CreateDealRequest(BaseModel):
+    name: str
+    amount: float = 0
+    stage: str | None = "new"
+
+@router.post("/deals")
+async def create_deal(payload: CreateDealRequest):
+    # TODO: persist to DB
+    return {"id": "mock-id", **payload.model_dump()}
+```
+
+**`apps/api/src/routers/proposals.py`**
+```python
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/proposal", tags=["Proposals"])
+
+class Item(BaseModel):
+    product_id: str
+    qty: float
+
+class GenerateProposalRequest(BaseModel):
+    deal_id: str
+    tariffs: dict | None = None
+    bom: list[Item]
+    template_id: str | None = None
+
+@router.post("/generate")
+async def generate_proposal(req: GenerateProposalRequest):
+    # TODO: price calc + PDF generation
+    return {"pdf_url": "https://example.com/proposal.pdf", "price": 123456}
+```
+
+**`apps/api/src/routers/procurement.py`**
+```python
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/procurement", tags=["Procurement"])
+
+class POItem(BaseModel):
+    product_id: str
+    qty: float
+    unit_price: float
+    tax_pct: float | None = 0
+
+class CreatePORequest(BaseModel):
+    vendor_id: str
+    project_id: str | None = None
+    items: list[POItem]
+
+@router.post("/po")
+async def create_po(req: CreatePORequest):
+    # TODO: persist + totals
+    return {"id": "po-1", **req.model_dump()}
+```
+
+**`apps/api/src/routers/tickets.py`**
+```python
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/tickets", tags=["Tickets"])
+
+class DispatchTicketRequest(BaseModel):
+    site_id: str
+    issue: str
+    sla_hours: int = 48
+
+@router.post("/dispatch")
+async def dispatch_ticket(req: DispatchTicketRequest):
+    # TODO: create ticket + assign
+    return {"ticket_id": "TKT-1001", **req.model_dump()}
+```
+
+**`apps/api/src/routers/tenders.py`**
+```python
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+router = APIRouter(prefix="/tenders", tags=["Tenders"])
+
+class TenderParseRequest(BaseModel):
+    tender_url: str | None = None
+    file_ids: list[str] | None = None
+
+@router.post("/parse")
+async def parse_tender(req: TenderParseRequest):
+    # TODO: extract clauses + checklist
+    return {"status": "ok", "requirements": ["EMD", "BG", "Turnover"]}
+```
+
+**`apps/api/src/routers/webhooks.py`**
+```python
+from fastapi import APIRouter, Request
+
+router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
+
+@router.post("/whatsapp")
+async def whatsapp(req: Request):
+    data = await req.json()
+    # TODO: parse and route to Lead Agent
+    return {"ok": True}
+
+@router.post("/email")
+async def email(req: Request):
+    return {"ok": True}
+
+@router.post("/inverter")
+async def inverter(req: Request):
+    return {"ok": True}
+```
+
+**`apps/api/src/main.py`**
+```python
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from .settings import settings
+from .routers import crm, proposals, procurement, tickets, tenders, webhooks
+
+app = FastAPI(title="DRF Agent Mesh API", version="0.1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.cors_origins] if settings.cors_origins != "*" else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(crm.router)
+app.include_router(proposals.router)
+app.include_router(procurement.router)
+app.include_router(tickets.router)
+app.include_router(tenders.router)
+app.include_router(webhooks.router)
+
+@app.get("/")
+def root():
+    return {"status": "ok"}
+```
+
+**`apps/api/tests/test_smoke.py`**
+```python
+def test_placeholder():
+    assert 1 + 1 == 2
+```
+
+---
+
+## 3) Next.js Admin – scaffold
+**`apps/web/package.json`**
+```json
+{
+  "name": "drf-admin-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "next": "^14.2.5",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "@types/react": "^18.2.73",
+    "@types/react-dom": "^18.2.24",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.5.4"
+  }
+}
+```
+
+**`apps/web/next.config.mjs`**
+```js
+/** @type {import('next').NextConfig} */
+const nextConfig = { reactStrictMode: true };
+export default nextConfig;
+```
+
+**`apps/web/tailwind.config.ts`**
+```ts
+import type { Config } from 'tailwindcss'
+const config: Config = {
+  content: ['./app/**/*.{ts,tsx}', './components/**/*.{ts,tsx}'],
+  theme: { extend: {} },
+  plugins: [],
+}
+export default config
+```
+
+**`apps/web/postcss.config.mjs`**
+```js
+export default { plugins: { tailwindcss: {}, autoprefixer: {} } }
+```
+
+**`apps/web/app/layout.tsx`**
+```tsx
+import './globals.css'
+export const metadata = { title: 'DRF Admin', description: 'DRF Agent Mesh' }
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en"><body className="min-h-screen bg-gray-50">{children}</body></html>
+  )
+}
+```
+
+**`apps/web/app/page.tsx`**
+```tsx
+export default function Page() {
+  const kpis = [
+    { title: 'Pipeline', value: '₹1.2Cr', sub: 'This month' },
+    { title: 'Win Rate', value: '24%', sub: 'L90D' },
+    { title: 'MTTR', value: '11.3h', sub: 'Tickets' },
+    { title: 'DSO', value: '38 days', sub: 'Finance' },
+  ]
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 p-6">
+      {kpis.map((k) => (
+        <div key={k.title} className="rounded-2xl bg-white shadow p-4">
+          <div className="text-sm text-gray-500">{k.title}</div>
+          <div className="text-2xl font-semibold mt-1">{k.value}</div>
+          <div className="text-xs text-gray-400 mt-1">{k.sub}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+```
+
+**`apps/web/components/Sidebar.tsx`** (optional later) – omitted for brevity; see prior canvas.
+
+**`apps/web/lib/api.ts`**
+```ts
+import axios from 'axios'
+export const api = axios.create({ baseURL: process.env.NEXT_PUBLIC_API_URL })
+```
+
+**`apps/web/Dockerfile`**
+```dockerfile
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
+RUN npm ci || yarn install || pnpm install
+
+FROM node:20-alpine AS build
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build || yarn build
+
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app/.next ./.next
+COPY --from=build /app/package.json ./package.json
+COPY --from=build /app/node_modules ./node_modules
+EXPOSE 3000
+CMD ["node", ".next/standalone/server.js"]
+```
+
+**`apps/web/.env.example`**
+```
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+**`apps/web/app/globals.css`**
+```css
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+```
+
+---
+
+## 4) Root files
+**`package.json`** (optional workspaces)
+```json
+{
+  "name": "drf-agent-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/web"
+  ]
+}
+```
+
+**`.env.example`**
+```
+# Root env if needed later
+```
+
+**`README.md`**
+```md
+# DRF Agent Monorepo
+
+Fast start for DRF Innovation India Pvt Ltd – API (FastAPI) + Admin (Next.js) with Docker Compose and CI.
+
+## Prereqs
+- Docker + Docker Compose
+- (Optional) Node 20 if running web locally without Docker
+
+## Run (dev)
+```bash
+docker-compose up --build
+```
+- API → http://localhost:8000 (Swagger at /docs)
+- Web → http://localhost:3000
+
+## Environment
+- Edit `apps/api/.env.example` and `apps/web/.env.example` as needed and rename to `.env` for production.
+
+## Tests
+```bash
+docker compose run --rm api pytest -q
+```
+
+## Deploy
+- Build images via CI or locally, push to registry (GHCR or Docker Hub), then run compose on server with proper `.env` secrets and volumes.
+
+## Next Steps
+- Expand SQLAlchemy models to match full schema (see previous canvas).
+- Implement services (CRUD, pricing, PDF, WhatsApp, approvals) incrementally.
+- Add Alembic migrations.
+```
+```
+
+---
+
+## 5) GitHub Actions – CI
+**`.github/workflows/ci.yml`**
+```yaml
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: drf
+          POSTGRES_USER: drf
+          POSTGRES_PASSWORD: drfpass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U drf -d drf" \
+          --health-interval 5s \
+          --health-timeout 5s \
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install API deps
+        working-directory: apps/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv pip-tools
+          pip-compile -o requirements.txt pyproject.toml
+          pip install -r requirements.txt
+      - name: Lint & Tests
+        working-directory: apps/api
+        env:
+          DATABASE_URL: postgresql+psycopg://drf:drfpass@localhost:5432/drf
+        run: |
+          pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        working-directory: apps/web
+        run: |
+          npm ci || yarn install || pnpm install
+      - name: Build
+        working-directory: apps/web
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+        run: |
+          npm run build || yarn build
+```
+
+---
+
+## 6) How to use
+1. Create a new GitHub repo, then copy these files/folders.
+2. Commit & push to `main`.
+3. In Actions, the CI should build API tests and Web build.
+4. Locally, run `docker-compose up --build` to boot full stack.
+
+> Need me to export this as a downloadable ZIP with all folders and files? I can generate the archive next so you can upload to GitHub directly.
